@@ -1,0 +1,94 @@
+#!/usr/bin/env ruby
+# measure the number of parallel http connections an http server accepts
+# from one ip address
+# Author: Benjamin Kellermann, License: GPLv3
+
+if ARGV.size < 2
+	puts "Usage: #{File.basename($0)} <uri> <num_of_connections1> [num_of_connections2 [num_of_connections3 [...]]]"
+	puts "e.g.:  #{File.basename($0)} https://www.example.org `seq 100 50 300`"
+	exit
+end
+
+require "socket"
+require "openssl"
+require "uri"
+require "pp"
+
+
+$stdout.flush
+
+$status_bar_size=100
+class HttpConnection
+	attr_reader :seconds_past, :response
+	def initialize(uri)
+		@uri = uri
+		@response = []
+		@t = Thread.new{
+			begin
+				if @uri.scheme == "https"
+					t = TCPSocket.open(@uri.host,@uri.port)
+					@s = OpenSSL::SSL::SSLSocket.new(t)
+					@s.hostname = @uri.host
+					@s.connect
+				else
+					@s = TCPSocket.open(@uri.host, @uri.port)
+				end
+				@s.puts("GET #{@uri.request_uri} HTTP/1.1\r\n")
+			rescue
+				@response << "<unable to connect>"
+			end
+		}
+	end
+	def finish
+		@t = Thread.new{
+			if @s
+				@s.puts("Host: #{@uri.host}\r\n")
+				@s.puts("Connection: close\r\n")
+				@s.puts("\r\n")
+				while (line = @s.gets)
+					@response << line
+				end
+				@s.close
+				@response << "<closed by server>" if @response.empty?
+			end
+		}
+	end
+	def wait
+		@t.join
+	end
+end
+
+uri = URI(ARGV.shift)
+num_of_connections = ARGV.collect{|i| i.to_i }.sort
+
+def wait_for_connections(connections, char)
+	num = connections.size
+	connections.each_with_index{|c,i|
+		c.wait
+		print char if i % (num/$status_bar_size) == 0
+	}
+end
+
+num_of_connections.each{|num|
+	connections = []
+	print "Trying #{num} parallel connections: "
+	num.times{
+		connections << HttpConnection.new(uri)
+	}
+	hint = " (#{num/$status_bar_size})"
+	print "|" + " "*$status_bar_size + "|" + hint + "\b"*($status_bar_size+1+hint.length)
+	wait_for_connections(connections,".")
+	print "\b"*$status_bar_size
+	connections.each{|c|
+		c.finish
+	}
+	wait_for_connections(connections,"#")
+	print "| "
+	responses = connections.collect{|c| c.response[0].chomp}
+	count = Hash.new(0)
+	responses.each{|r| count[r] += 1}
+	responses.uniq!.collect!{|r| "#{r} (#{count[r]})"}
+	puts responses.join(", ")
+	#exit if responses.size > 1
+}
+

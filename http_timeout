@@ -1,0 +1,96 @@
+#!/usr/bin/env ruby
+# measure the http timeout an http server has configured
+# Author: Benjamin Kellermann, License: GPLv3
+
+if ARGV.size < 2
+	puts "Usage: #{File.basename($0)} <uri> <sleeptime1> [sleeptime2 [sleeptime3 [...]]]"
+	puts "e.g.:  #{File.basename($0)} https://www.example.org `seq 20 5 40`"
+	exit
+end
+
+
+require "socket"
+require "openssl"
+require "uri"
+require "pp"
+
+
+$stdout.flush
+$update_interval = 1
+
+
+
+class HttpConnection
+	attr_reader :seconds_past, :sleeptime, :response
+	def initialize(uri, sleeptime)
+		@uri = uri
+		@sleeptime = sleeptime
+		@response = []
+		@closed = false
+		if @uri.scheme == "https"
+			@s = OpenSSL::SSL::SSLSocket.new(TCPSocket.open(@uri.host,@uri.port))
+			@s.hostname = @uri.host
+			@s.connect
+		else
+			@s = TCPSocket.open(@uri.host, @uri.port)
+		end
+		@s.puts("GET #{@uri.request_uri} HTTP/1.1\r\n")
+		@t = Thread.new{
+			(@sleeptime/$update_interval).times{|i|
+				@seconds_past = i*@sleeptime/$update_interval
+				sleep $update_interval
+			}
+			@s.puts("Host: #{@uri.host}\r\n")
+			@s.puts("Connection: close\r\n")
+			@s.puts("\r\n")
+			while (line = @s.gets)
+				@response << line
+			end
+			@s.close
+			@closed = true
+			@response << "<closed by server>" if @response.empty?
+		}
+	end
+	def running?
+		!@closed
+	end
+	def stats
+		"Sleeptime: #{@sleeptime}; Closed: #{@s.closed?}; Response: #{@response.inspect}"
+	end
+end
+
+uri = URI(ARGV.shift)
+sleeptimes = ARGV.collect{|i| i.to_i }.sort
+
+
+connections = []
+sleeptimes.each{|sleeptime|
+	connections << HttpConnection.new(uri, sleeptime)
+}
+puts "Processes Launched: #{sleeptimes.join(", ")}"
+
+def sleep_for(sec)
+	print "Sleeping for #{sec} seconds: |"
+	print " "*(sec/$update_interval)
+	print "|"
+	print "\b"*(sec/$update_interval+1)
+	(sec/$update_interval).times{
+		sleep $update_interval
+		print "#"
+	}
+end
+sleep_for(sleeptimes[0])
+
+while true
+	c = connections[0]
+	unless c.running?
+		puts "\nProcess finished: #{c.sleeptime}: #{c.response[0].to_s.chomp}"
+		connections.delete(c)
+		sleeptimes.delete(c.sleeptime)
+		exit if sleeptimes.empty?
+		sleep_for(sleeptimes[0]-c.sleeptime)
+	else
+		sleep $update_interval
+	end
+end
+
